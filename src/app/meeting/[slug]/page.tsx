@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { io, Socket } from 'socket.io-client';
 import { useLocalStream } from '@/hooks/useLocalStream';
+import { useMediasoup } from '@/hooks/useMediasoup'; // IMPORTED THE NEW HOOK
 import { AudioVisualizer } from '@/components/room/AudioVisualizer';
 
 // PRO ARCHITECTURE: Interfaces
@@ -25,10 +26,16 @@ interface ParticipantItemProps {
 export default function MeetingRoom() {
   const params = useParams();
   const router = useRouter();
-  const socketRef = useRef<Socket | null>(null);
+  
+  // FIXED: Changed from useRef to useState so useMediasoup triggers correctly
+  const [socket, setSocket] = useState<Socket | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const roomId = params.slug as string;
   
   const { stream, startStream, toggleCamera, toggleMic, startScreenShare, stopScreenShare } = useLocalStream();
+  
+  // INJECT MEDIASOUP ENGINE
+  const { remoteStreams } = useMediasoup(socket, roomId, stream);
   
   const [participants, setParticipants] = useState<{id: string, name: string}[]>([]);
   const [isMuted, setIsMuted] = useState(false);
@@ -40,26 +47,26 @@ export default function MeetingRoom() {
   useEffect(() => { 
     startStream();
     
-    // Connect to the Accountants (Port 4000 or Render URL)
     const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
-    socketRef.current = io(apiBase, { withCredentials: true });
+    const newSocket = io(apiBase, { withCredentials: true });
+    setSocket(newSocket);
 
-    const roomId = params.slug as string;
     const name = "User_" + Math.floor(Math.random() * 1000);
 
-    // UNIQUE IDENTITY LOGIC: Passes your specific name/ID to the backend
-    socketRef.current.emit("request-join", { 
+    newSocket.emit("request-join", { 
         roomId, 
         displayName: name 
     });
     
-    // LISTEN: Room Participant synchronization
-    socketRef.current.on('room:participant_list', (list) => setParticipants(list));
-    socketRef.current.on('participant:joined', (p) => setParticipants(prev => [...prev, p]));
-    socketRef.current.on('participant:left', (id) => setParticipants(prev => prev.filter(p => p.id !== id)));
+    // SFU specific: join the media routing room
+    newSocket.emit('join-sfu-room', { roomId });
+    
+    newSocket.on('room:participant_list', (list) => setParticipants(list));
+    newSocket.on('participant:joined', (p) => setParticipants(prev => [...prev, p]));
+    newSocket.on('participant:left', (id) => setParticipants(prev => prev.filter(p => p.id !== id)));
 
-    return () => { socketRef.current?.disconnect(); };
-  }, [startStream, params.slug]);
+    return () => { newSocket.disconnect(); };
+  }, [startStream, roomId]);
 
   // Handle Video element source binding
   useEffect(() => {
@@ -102,16 +109,16 @@ export default function MeetingRoom() {
         <header className="p-4 flex justify-between items-center bg-[#111111] border-b border-white/5">
             <div className="flex items-center gap-4">
               <div className="bg-red-600 px-3 py-1 rounded text-[10px] font-bold uppercase animate-pulse">Live</div>
-              <h2 className="text-sm font-bold tracking-tight opacity-80 uppercase">ZYNDRX | {params.slug}</h2>
+              <h2 className="text-sm font-bold tracking-tight opacity-80 uppercase">ZYNDRX | {roomId}</h2>
             </div>
             <button onClick={copyMeetingLink} className="flex items-center gap-2 bg-blue-600/10 hover:bg-blue-600/20 px-4 py-2 rounded-xl text-blue-500 text-xs font-black uppercase">
                 {copied ? <Check size={14}/> : <Copy size={14}/>} {copied ? "Copied" : "Copy Link"}
             </button>
         </header>
 
-        <main className="flex-1 p-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 overflow-hidden">
+        <main className="flex-1 p-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 overflow-hidden content-start">
           {/* HOST BOX (YOU) */}
-          <div className="bg-[#0A0A0A] rounded-[32px] border border-white/5 overflow-hidden relative shadow-2xl transition-all">
+          <div className="bg-[#0A0A0A] rounded-[32px] border border-white/5 overflow-hidden relative shadow-2xl transition-all min-h-[300px]">
             <div className="absolute top-6 left-6 z-10 flex items-center gap-3">
                <div className="bg-black/60 px-4 py-2 rounded-2xl text-[10px] font-black tracking-widest uppercase border border-white/5 flex items-center gap-2">
                  {isMuted ? <MicOff size={12} className="text-red-500"/> : <Mic size={12} className="text-green-500"/>} YOU
@@ -119,22 +126,22 @@ export default function MeetingRoom() {
                {!isMuted && <AudioVisualizer stream={stream} />}
             </div>
             {camOff ? (
-               <div className="w-full h-full flex flex-col items-center justify-center text-slate-700 bg-slate-900/10 uppercase tracking-widest text-[9px] font-black">Camera Disabled</div>
+               <div className="w-full h-full flex flex-col items-center justify-center text-slate-700 bg-slate-900/10 uppercase tracking-widest text-[9px] font-black min-h-[300px]">Camera Disabled</div>
             ) : (
-               <video ref={videoRef} autoPlay muted playsInline className="w-full h-full object-cover -scale-x-100" />
+               <video ref={videoRef} autoPlay muted playsInline className="w-full h-full object-cover -scale-x-100 min-h-[300px]" />
             )}
           </div>
 
-          {/* GUEST PLACEHOLDERS (This would be remote streams) */}
-          {participants.map(p => (
-              <div key={p.id} className="bg-white/2 rounded-[32px] border border-white/10 flex flex-col items-center justify-center relative border-dashed">
-                 <div className="absolute top-6 left-6 bg-white/5 px-4 py-2 rounded-2xl text-[10px] font-black uppercase text-slate-500">{p.name}</div>
-                 <Users size={40} className="text-white/5" />
-              </div>
-          ))}
+          {/* REMOTE STREAMS (Other people) */}
+          {Array.from(remoteStreams.entries()).map(([socketId, remoteStream]) => {
+              const participantInfo = participants.find(p => p.id === socketId);
+              const displayName = participantInfo ? participantInfo.name : "Guest";
+              
+              return <RemoteVideoPlayer key={socketId} stream={remoteStream} name={displayName} />;
+          })}
         </main>
 
-        <footer className="p-8 flex justify-center fixed bottom-0 w-[calc(100%-260px)]">
+        <footer className="p-8 flex justify-center fixed bottom-0 w-[calc(100%-260px)] z-50">
             <div className="bg-[#141414]/95 backdrop-blur-3xl px-8 py-5 rounded-[40px] border border-white/10 flex items-center gap-8 shadow-2xl pointer-events-auto">
               <ControlBtn onClick={handleMicToggle} active={isMuted} icon={isMuted ? <MicOff /> : <Mic />} label={isMuted ? "Unmute" : "Mute"} />
               <ControlBtn onClick={handleCameraToggle} active={camOff} icon={camOff ? <VideoOff /> : <VideoIcon />} label="Video" />
@@ -150,7 +157,7 @@ export default function MeetingRoom() {
       </div>
 
       {/* PARTICIPANTS SIDEBAR */}
-      <aside className="w-[260px] bg-[#0D0D0D] border-l border-white/5 p-6 flex flex-col gap-6">
+      <aside className="w-[260px] bg-[#0D0D0D] border-l border-white/5 p-6 flex flex-col gap-6 z-10">
           <div className="flex items-center gap-3 text-slate-500 uppercase tracking-widest font-black text-[11px]">
              <Users size={16}/> Attendees ({participants.length + 1})
           </div>
@@ -163,7 +170,31 @@ export default function MeetingRoom() {
   );
 }
 
-// Strictly Typed Props to clear Errors
+// --- SUB-COMPONENTS ---
+
+// Renders the actual video element for incoming Mediasoup streams
+const RemoteVideoPlayer = ({ stream, name }: { stream: MediaStream, name: string }) => {
+  const remoteVideoRef = useRef<HTMLVideoElement>(null);
+
+  useEffect(() => {
+    if (remoteVideoRef.current && stream) {
+      remoteVideoRef.current.srcObject = stream;
+    }
+  }, [stream]);
+
+  return (
+    <div className="bg-[#0A0A0A] rounded-[32px] border border-white/5 overflow-hidden relative shadow-2xl transition-all min-h-[300px]">
+      <div className="absolute top-6 left-6 z-10 flex items-center gap-3">
+          <div className="bg-black/60 px-4 py-2 rounded-2xl text-[10px] font-black tracking-widest uppercase border border-white/5 flex items-center gap-2">
+            {name}
+          </div>
+      </div>
+      {/* Note: Do NOT mute remote videos, otherwise you won't hear them! */}
+      <video ref={remoteVideoRef} autoPlay playsInline className="w-full h-full object-cover min-h-[300px]" />
+    </div>
+  );
+};
+
 const ControlBtn = ({ onClick, active, icon, label }: ControlBtnProps) => (
   <div className="flex flex-col items-center gap-2 group cursor-pointer" onClick={onClick}>
      <div className={`p-5 rounded-3xl transition-all shadow-md ${active ? 'bg-red-600 text-white' : 'bg-white/5 text-slate-300 hover:bg-white/10'}`}>
