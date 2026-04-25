@@ -58,7 +58,10 @@ export default function MeetingRoom() {
 
     // SFU socket — all mediasoup signaling (port 4001)
     const sfuBase = process.env.NEXT_PUBLIC_SFU_URL || "http://localhost:4001";
-    const newSfuSocket = io(sfuBase, { withCredentials: false });
+const newSfuSocket = io(sfuBase, { 
+  withCredentials: false,
+  transports: ['websocket'], // skip polling — avoids 400 errors on Fly.io
+});
     setSfuSocket(newSfuSocket);
 
     // FIX: Wait for SFU socket to connect before joining API room so we can
